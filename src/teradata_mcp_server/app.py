@@ -881,8 +881,11 @@ Returns:
             globals()[name] = fn
             logger.info(f"Created cube: {name}")
         elif obj_type == "glossary"  and any(re.match(pattern, name) for pattern in config.get('resource',[])):
-            custom_glossary = {k: v for k, v in obj.items() if k != "type"}
-            logger.info(f"Added custom glossary entries for: {name}.")
+            # Keep each glossary entry keyed by its object name (do not overwrite prior entries).
+            entry = {k: v for k, v in obj.items() if k != "type"}
+            if entry:
+                custom_glossary[name] = entry
+                logger.info(f"Added custom glossary entry for: {name}.")
         else:
             logger.info(f"Type {obj_type if obj_type else ''} for custom object {name} is {'unknown' if obj_type else 'undefined'}.")
 

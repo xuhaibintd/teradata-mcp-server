@@ -26,6 +26,7 @@ class ModuleLoader:
         'fs': 'teradata_mcp_server.tools.fs',
         'qlty': 'teradata_mcp_server.tools.qlty',
         'rag': 'teradata_mcp_server.tools.rag',
+        'rest': 'teradata_mcp_server.tools.rest',
         'sql_opt': 'teradata_mcp_server.tools.sql_opt',
         'sec': 'teradata_mcp_server.tools.sec',
         'tmpl': 'teradata_mcp_server.tools.tmpl',

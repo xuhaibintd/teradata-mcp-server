@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 logs/
 working/
 .env
@@ -14,3 +14,4 @@ var/
 /profiles.yml
 /*_objects.yml
 examples/app-flowise/.*
+src/teradata_mcp_server/config/rest_config.yml

@@ -19,6 +19,7 @@ dba:
     - ^dba_*
     - ^base_*
     - ^sec_*
+    - ^rest_.*
   prompt:
     - ^dba_*
 
@@ -34,6 +35,7 @@ dataScientist:
     - ^dba_userSqlList
     - ^plot_*
     - ^tdml_*
+    - ^rest_.*
   prompt:
     - ^rag_*
     - ^sql_*
@@ -44,6 +46,7 @@ eda:
     - "base_(?!(writeQuery|dynamicQuery)$).*"
     - qlty_.*
     - sec_userDbPermissions
+    - ^rest_.*
     
 bar:
   tool:
