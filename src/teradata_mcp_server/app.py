@@ -1110,9 +1110,9 @@ Returns:
 
         elif obj_type == "glossary" and any(re.match(pattern, name) for pattern in config.get("resource", [])):
             # Keep each glossary entry keyed by its object name (do not overwrite prior entries).
-            entry = {k: v for k, v in obj.items() if k != "type"}
-            if entry:
-                custom_glossary[name] = entry
+            glossary_entry = {k: v for k, v in obj.items() if k != "type"}
+            if glossary_entry:
+                custom_glossary[name] = glossary_entry
                 logger.info(f"Added custom glossary entry for: {name}.")
 
         else:

@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from collections.abc import MutableMapping
 from typing import Any
 from urllib.parse import urljoin
 
@@ -113,7 +114,7 @@ class DSAClient:
         url = urljoin(self.base_url, endpoint)
 
         # Prepare headers
-        request_headers = {
+        request_headers: MutableMapping[str, str | bytes] = {
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": "Teradata-MCP-Server-BAR/1.0.0",

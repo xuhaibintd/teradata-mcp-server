@@ -1,7 +1,9 @@
 import logging
 import os
 import threading
+from collections.abc import MutableMapping
 from importlib import resources
+from importlib.resources import as_file
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -56,7 +58,8 @@ def _resolve_rest_config_path() -> Path | None:
     try:
         pkg_path = resources.files("teradata_mcp_server.config").joinpath("rest_config.yml")
         if pkg_path.is_file():
-            return Path(pkg_path)
+            with as_file(pkg_path) as resolved_path:
+                return resolved_path
     except Exception:
         logger.debug("Packaged rest_config.yml not found via importlib.resources", exc_info=True)
 
@@ -72,7 +75,7 @@ def _load_rest_config() -> dict[str, Any]:
 
     try:
         default_conf = _default_rest_config()
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             loaded = yaml.safe_load(f) or {}
             merged = default_conf | loaded
             if "auth" in loaded:
@@ -127,7 +130,7 @@ def _build_login_url(auth_conf: dict[str, Any]) -> str:
     """Build full login URL from config."""
     login_url = auth_conf.get("login_url")
     if login_url:
-        return login_url
+        return str(login_url)
 
     base_url = (REST_CONFIG.get("base_url") or "").strip()
     login_path = (auth_conf.get("login_path") or "").lstrip("/")
@@ -135,7 +138,7 @@ def _build_login_url(auth_conf: dict[str, Any]) -> str:
         raise ValueError("Auth config missing base_url or login_path")
 
     base = base_url if base_url.endswith("/") else f"{base_url}/"
-    return urljoin(base, login_path)
+    return str(urljoin(base, login_path))
 
 
 def _auth_enabled() -> bool:
@@ -182,7 +185,7 @@ def _fetch_token(auth_conf: dict[str, Any]) -> str:
     return str(token)
 
 
-def _ensure_auth_header(headers: dict[str, str]) -> dict[str, str]:
+def _ensure_auth_header(headers: MutableMapping[str, str | bytes]) -> MutableMapping[str, str | bytes]:
     """Ensure Authorization header is set using cached or freshly fetched token."""
     auth_conf = REST_CONFIG.get("auth") or {}
     if not auth_conf.get("enabled"):
@@ -203,7 +206,7 @@ def _ensure_auth_header(headers: dict[str, str]) -> dict[str, str]:
     return headers
 
 
-def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) -> str:
+def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) -> dict[str, Any]:
     """
     Generic REST caller.
 
@@ -215,7 +218,7 @@ def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) 
         request = RestRequest()
 
     timeout = request.timeout or REST_CONFIG.get("timeout") or DEFAULT_TIMEOUT
-    headers: dict[str, str] = {}
+    headers: MutableMapping[str, str | bytes] = {}
     headers.update(REST_CONFIG.get("default_headers") or {})
     headers.update(request.headers or {})
     params: dict[str, Any] = {}
@@ -258,7 +261,9 @@ def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) 
         base_netloc = ""
 
     generic_path = _is_generic(path_hint)
-    generic_url_path = parsed_url is not None and parsed_url.netloc == base_netloc and _is_generic(parsed_url.path or "")
+    generic_url_path = (
+        parsed_url is not None and parsed_url.netloc == base_netloc and _is_generic(parsed_url.path or "")
+    )
     unknown_path = path_norm not in allowed_paths
     no_user_path = (not request.url and (generic_path or unknown_path)) or generic_url_path
 
@@ -299,7 +304,7 @@ def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) 
             url,
             headers=headers or None,
             params=params or None,
-            json=request.json,
+            json=request.json_body,
             timeout=timeout,
             verify=REST_CONFIG.get("verify_ssl", True),
         )
@@ -315,7 +320,7 @@ def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) 
                 url,
                 headers=headers or None,
                 params=params or None,
-                json=request.json,
+                json=request.json_body,
                 timeout=timeout,
                 verify=REST_CONFIG.get("verify_ssl", True),
             )
@@ -350,7 +355,7 @@ def handle_teikei(
     instruction: str = "",
     action: str | None = None,
     json_payload: Any | None = None,
-) -> str:
+) -> dict[str, Any]:
     """
     Call teikei API based on explicit or inferred action.
 

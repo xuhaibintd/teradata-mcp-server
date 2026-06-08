@@ -3,8 +3,9 @@
 import os
 from dataclasses import dataclass
 from importlib import resources
+from importlib.resources import as_file
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
@@ -39,23 +40,24 @@ def _resolve_config_path() -> Path | None:
     try:
         pkg_path = resources.files("teradata_mcp_server.config").joinpath("rest_config.yml")
         if pkg_path.is_file():
-            return Path(pkg_path)
+            with as_file(pkg_path) as resolved_path:
+                return resolved_path
     except Exception:
         pass
     return None
 
 
-def _load_yaml_endpoints(path: Path) -> Dict[str, Dict[str, Endpoint]]:
-    with open(path, "r", encoding="utf-8") as f:
+def _load_yaml_endpoints(path: Path) -> dict[str, dict[str, Endpoint]]:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     # support two layouts: top-level "endpoints" or direct mapping
     candidates = data.get("endpoints") if isinstance(data, dict) else None
     if candidates is None:
         candidates = data if isinstance(data, dict) else {}
 
-    parsed: Dict[str, Dict[str, Endpoint]] = {}
+    parsed: dict[str, dict[str, Endpoint]] = {}
     for group, defs in candidates.items():
-        group_map: Dict[str, Endpoint] = {}
+        group_map: dict[str, Endpoint] = {}
         for name, meta in (defs or {}).items():
             method = (meta or {}).get("method")
             template = (meta or {}).get("path_template")
@@ -67,7 +69,7 @@ def _load_yaml_endpoints(path: Path) -> Dict[str, Dict[str, Endpoint]]:
     return parsed
 
 
-def load_endpoints() -> Dict[str, Dict[str, Endpoint]]:
+def load_endpoints() -> dict[str, dict[str, Endpoint]]:
     endpoints = {"teikei": _default_teikei_endpoints()}
     path = _resolve_config_path()
     if not path:
