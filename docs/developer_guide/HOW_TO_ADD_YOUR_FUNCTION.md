@@ -65,7 +65,7 @@ def handle_fs_myFunctionName(
 
     except Exception as e:
         logger.error(f"Error in handle_fs_myFunctionName: {e}")
-        return create_response({"error": str(e)}, {"tool_name": "fs_myFunctionName"})
+        raise
 ```
 
 ---
@@ -83,6 +83,26 @@ fs:
     fs_myPromptName: True
 ```
 
+
+---
+
+### 🏷️ Tool Annotations (automatic)
+
+Every registered tool receives an MCP `ToolAnnotations` object based on its name prefix. These hints tell LLM clients whether a tool is safe to run silently (`readOnlyHint`) or requires a confirmation prompt (`destructiveHint`).
+
+| Prefix | Hint applied |
+|--------|-------------|
+| `base_`, `dba_`, `sec_`, `rag_`, `qlty_`, `graph_`, `sql_`, `plot_`, `tdvs_` | `readOnlyHint=True, idempotentHint=True` |
+| `bar_` | `readOnlyHint=False, destructiveHint=True` |
+| `tdml_` | `readOnlyHint=False, idempotentHint=True` |
+| `chat_`, `fs_`, unknown prefixes | No annotation (MCP default) |
+
+Per-tool overrides exist for `tdvs_grant_user` and `tdvs_revoke_user` (marked destructive despite the read-only `tdvs_` prefix).
+
+When adding a new tool:
+- **Existing prefix** — no action needed; the correct annotation is inherited automatically.
+- **New prefix** — add an entry to `_PREFIX_ANNOTATIONS` in `app.py`.
+- **Exception within a read-only prefix** (e.g., a future `dba_dropTable`) — add a per-tool entry to `_TOOL_ANNOTATIONS` in `app.py`.
 
 ---
 
@@ -126,4 +146,33 @@ Use MCP Inspector or your client (Claude Desktop) to call the tool once it’s e
 | MCP wrapper (auto)          | Auto-generated MCP wrapper around your handler (built at startup).           |
 | `execute_db_tool` (internal)  | Central adapter: sets QueryBand, handles errors/formatting, reconnects.    |
 
-Let me know if you'd like this as a template or reusable decorator for many functions. 
+---
+
+## ➕ Adding a teradataml Analytic Function (`tdml_*`)
+
+The `tdml_*` tools (e.g., `tdml_KMeans`, `tdml_XGBoost`) are registered dynamically from the teradataml library. They do **not** follow the `handle_*` pattern — instead, they are driven by a curated dictionary.
+
+### How it works
+
+1. `tools/constants.py` contains `TD_ANALYTIC_FUNCS`, a `dict[str, str]` mapping each teradataml function name to a curated one-line summary.
+2. At startup, `app.py` iterates this dict, queries the live teradataml JSON store for each function's parameter metadata, and generates + registers a `tdml_<FunctionName>` MCP tool automatically.
+3. `build_tdml_tool_docstring()` in `tools/utils/__init__.py` assembles the compact description (summary + one line per parameter with Required/Optional and types).
+
+### Steps to add a new function
+
+1. Open `src/teradata_mcp_server/tools/constants.py`.
+2. Add one entry to `TD_ANALYTIC_FUNCS`:
+
+```python
+TD_ANALYTIC_FUNCS = {
+    ...
+    "MyNewFunction": "One-sentence description of what this function does.",
+}
+```
+
+That's it — no other code changes are needed. The server will register `tdml_MyNewFunction` automatically on next startup, provided the function exists in the connected database's teradataml version.
+
+### Notes
+- The summary should be one sentence, no longer than ~120 characters.
+- If the function is not present in the connected database, it is skipped with a warning — no error.
+- The `fs` extra (`uv sync --extra fs`) must be installed for any `tdml_*` tools to register.

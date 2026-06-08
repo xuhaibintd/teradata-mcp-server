@@ -28,6 +28,7 @@ export DATABASE_URI="teradata://username:password@host:1025/database"
 export MCP_TRANSPORT="stdio"           # or "streamable-http"
 export MCP_HOST="localhost"            # for HTTP transport
 export MCP_PORT="8001"                 # for HTTP transport
+export MCP_PING_INTERVAL="30"         # keep-alive ping interval (seconds) for streamable-http and sse transports
 export PROFILE="all"                   # tool profile to load
 export LOGGING_LEVEL="WARNING"         # DEBUG, INFO, WARNING, ERROR
 
@@ -36,6 +37,10 @@ export LOGMECH="TD2"                   # TD2, LDAP, KRB5, JWT
 export TD_POOL_SIZE="5"                # connection pool size
 export TD_MAX_OVERFLOW="10"            # max overflow connections
 export TD_POOL_TIMEOUT="30"            # connection timeout seconds
+
+# Optional: Query result limits
+export DEFAULT_ROW_LIMIT="1000"        # default max rows returned by base_readQuery
+export MAX_ROW_LIMIT="50000"           # hard ceiling; callers cannot exceed this
 
 # Optional: Authentication (see Security guide)
 export AUTH_MODE="none"                # or "basic"  
@@ -87,6 +92,74 @@ The server uses a **layered configuration approach** where configuration files a
 
 Later layers override earlier layers, and top-level keys are replaced entirely (no merge)
 
+
+## Teradata Vector Store tools (`tdvs`)
+
+The `tdvs` module provides tools to manage and use Teradata Vector Stores. It requires **Teradata Vantage 20.0+** and the `teradatagenai` Python library.
+
+### Install the optional dependency
+
+The `teradatagenai` library is not installed by default. Add it with the `[tdvs]` extra:
+
+```bash
+# With uv
+uv tool install "teradata-mcp-server[tdvs]"
+
+# With pip
+pip install "teradata-mcp-server[tdvs]"
+```
+
+### Environment variables
+
+In addition to `DATABASE_URI`, the `tdvs` module requires the following variables:
+
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URI` | Yes | Standard Teradata connection string |
+| `TD_BASE_URL` | Yes | Base URL of the Teradata Vector Store service |
+| `TD_PAT` | No | Personal Access Token for authentication. Falls back to `DATABASE_URI` credentials if not set. |
+| `TD_PEM` | No | Path to PEM certificate file. Used together with `TD_PAT`. |
+
+Add them to your `.env` file:
+
+```dotenv
+DATABASE_URI=teradata://myuser:mypassword@my-host:1025/mydb
+TD_BASE_URL=https://my-tdvs-host/api
+TD_PAT=my-personal-access-token
+TD_PEM=/path/to/my/cert.pem
+```
+
+### Claude Desktop configuration
+
+Use `uvx` with the `--from` flag to pull the `[tdvs]` extra, and pass the variables in the `env` block.
+
+> **Shell quoting note:** If running `uvx` manually in a terminal (zsh/bash), quote the package spec to prevent glob expansion: `uvx --from "teradata-mcp-server[tdvs]" teradata-mcp-server`. In the Claude Desktop JSON config below this is not needed — args are passed directly to the process without shell interpretation.
+
+```json
+{
+  "mcpServers": {
+    "teradata-mcp-server": {
+      "command": "uvx",
+      "args": [
+        "--from", "teradata-mcp-server[tdvs]",
+        "teradata-mcp-server"
+      ],
+      "env": {
+        "DATABASE_URI": "teradata://myuser:mypassword@my-host:1025/mydb",
+        "PROFILE": "all",
+        "MCP_TRANSPORT": "stdio",
+        "TD_BASE_URL": "https://my-tdvs-host/api",
+        "TD_PAT": "my-personal-access-token",
+        "TD_PEM": "/path/to/my/cert.pem"
+      }
+    }
+  }
+}
+```
+
+> **Note:** `TD_PAT` and `TD_PEM` are optional. If omitted, the server authenticates to the Vector Store using the username and password from `DATABASE_URI`.
+
+---
 
 ## 🎯 Profiles
 
@@ -159,6 +232,28 @@ Your custom `profiles.yml` will be merged with the built-in profiles, allowing y
 - Add new profiles
 - Extend built-in profiles with additional tools
 
+## 🔍 Progressive Disclosure
+
+By default, all tools in the active profile are registered individually and listed by the client at startup. With many tools loaded this can consume a significant portion of the LLM context window.
+
+**Progressive disclosure** reduces this by exposing only three proxy tools to the client — `search_tool`, and `execute_tool`— while keeping the full tool catalog available on demand. The LLM searches for tools by keyword, retrieves full documentation on the ones it needs, then executes them.
+
+```bash
+# Enable via flag
+teradata-mcp-server --progressive_disclosure
+
+# Or via environment variable
+export PROGRESSIVE_DISCLOSURE=true
+teradata-mcp-server
+```
+
+| Mode | Client sees | Context window |
+|------|-------------|----------------|
+| Static (default) | All tools listed at startup | Higher usage |
+| Progressive disclosure | 3 proxy tools | ~99% reduction |
+
+See the [developer guide](../developer_guide/PROGRESSIVE_DISCLOSURE.md) for details on the search algorithm and two-tier discovery workflow.
+
 ## 🚄 Transport Modes
 
 ### stdio (Default)
@@ -199,6 +294,16 @@ For specialized streaming applications:
 teradata-mcp-server --mcp_transport sse --mcp_port 8001
 ```
 
+### Keep-Alive (HTTP/SSE transports)
+
+Load balancers and reverse proxies (nginx, AWS ALB) close idle connections after a fixed timeout. For long-running Teradata queries over `streamable-http` or `sse`, the server sends periodic ping messages to keep the connection alive.
+
+```bash
+export MCP_PING_INTERVAL="30"   # seconds between keep-alive pings (default: 30)
+```
+
+This has no effect on `stdio` transport.
+
 ## 🔒 Authentication Configuration
 
 ### No Authentication (Default)
@@ -231,6 +336,19 @@ export TD_POOL_SIZE="5"        # Base connections
 export TD_MAX_OVERFLOW="10"    # Additional connections under load  
 export TD_POOL_TIMEOUT="30"    # Seconds to wait for connection
 ```
+
+### Query Result Limits
+
+`base_readQuery` caps results to prevent LLM token overflow. Results beyond the limit are silently dropped and the response metadata includes `"truncated": true`.
+
+```bash
+export DEFAULT_ROW_LIMIT="1000"   # Default max rows per base_readQuery call
+export MAX_ROW_LIMIT="50000"      # Hard ceiling; the row_limit parameter cannot exceed this
+```
+
+When a query is truncated, the LLM can:
+- Pass a higher `row_limit` (up to `MAX_ROW_LIMIT`) to retrieve more rows in a single response.
+- Pass `persist=true` to write the full result set to a volatile table and query it directly — this bypasses the row cap entirely and is recommended for large result sets.
 
 ### Authentication Methods
 

@@ -47,7 +47,7 @@ eda:
     - qlty_.*
     - sec_userDbPermissions
     - ^rest_.*
-    
+
 bar:
   tool:
     - ^bar_*
@@ -64,3 +64,11 @@ llmUser:
     - ^chat_*
   prompt:
     - ^chat_*
+
+graph:
+  tool:
+    - ^graph_.*     
+  prompt:
+    - ^graph_.*
+  resource:
+    - ^graph_edge_contract$

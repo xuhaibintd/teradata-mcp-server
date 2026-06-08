@@ -38,13 +38,33 @@ npx modelcontextprotocol/inspector uv run teradata-mcp-server
 
 ### 5) Run tests
 
-Always run tests before submitting a PR:
+Always run the full pre-push checklist before submitting a PR. Run steps in order — the fast checks come first so you fail early.
 
 ```bash
-# core tests
-python tests/run_mcp_tests.py "uv run teradata-mcp-server"
+# 1. Lint (no database required)
+uv run ruff check src/
+uv run ruff format --check src/
+
+# 2. Type check (no database required)
+uv sync --extra dev
+uv run mypy src/
+
+# 3. HTTP transport smoke test (no database required)
+#    Catches startup-time errors in HTTP-specific code paths (middleware,
+#    imports, constructor errors) that the stdio suite cannot reach.
+uv run python tests/smoke_http.py --verbose
+
+# 4. Integration tests — stdio (requires DATABASE_URI)
+export DATABASE_URI="teradata://user:pass@host:1025/database"
+uv run python tests/run_mcp_tests.py "uv run teradata-mcp-server"
+
+# 5. Integration tests — streamable-http (requires DATABASE_URI)
+uv run python tests/run_mcp_tests.py "uv run teradata-mcp-server" --transport streamable-http
 ```
-Most users use the MCP server with Claude, stdio, so always test Claude's behaviour with your code or build before pushing it. 
+
+Steps 1–3 have no database dependency and are quick — run them on every change. Steps 4–5 require VPN and credentials; run them when you have changed tool handlers, middleware, or connection logic.
+
+Most users use the MCP server with Claude over stdio, so always test Claude's behaviour with your code or build before pushing it.
 
 Example configurations:
 ```json
@@ -106,7 +126,7 @@ The directory structure will follow the following conventions
 - `config.py`: `Settings` dataclass and `settings_from_env()` for centralized configuration (single source of truth; precedence is CLI > env > defaults).
 - `utils.py` (logging): structured logging setup (stdio‑safe) and JSON formatter.
 - `middleware.py`: shared `RequestContextMiddleware` that extracts per-request context; has a stdio fast-path (no headers/auth) and a full HTTP/SSE path that can enforce auth and cache.
-- MCP adapter (inlined in `app.py`): internal `execute_db_tool` (DB connection injection, QueryBand, error handling) and `make_tool_wrapper` (auto MCP wrapper for `handle_*` functions).
+- MCP adapter (inlined in `app.py`): internal `execute_db_tool` (DB connection injection, QueryBand, raises `ToolError` on failure) and `make_tool_wrapper` (auto MCP wrapper for `handle_*` functions). `ErrorHandlingMiddleware` with `mask_error_details=True` ensures raw SQL errors and stack traces are never forwarded to LLM clients.
 - `tools/utils/queryband.py`: pure helpers to build Teradata QueryBand strings from request context (protocol-agnostic).
 - `utils.py`: configuration helpers for profiles and YAML object loading.
 - `testing/`: testing framework and utilities.
@@ -373,6 +393,19 @@ This section explains how the pieces fit together at runtime.
   - The wrapper delegates execution to `execute_db_tool` which:
     - Injects a DB connection (SQLAlchemy `Connection` preferred)
     - Sets QueryBand based on request context (`tools/utils/queryband.py`)
+- Dynamically registers `tdml_*` analytic function tools via the `teradata_lifespan` context manager, after the database connection and teradataml context are confirmed (see below).
+
+### Dynamic teradataml Analytic Function Registration
+
+The ~89 `tdml_*` tools (e.g., `tdml_KMeans`, `tdml_XGBoost`) are not defined as `handle_*` functions. Instead, `app.py` generates and registers them inside the `teradata_lifespan` async context manager at server startup, after the teradataml context is established:
+
+1. **`tools/constants.py`** — `TD_ANALYTIC_FUNCS` is a `dict[str, str]` mapping each teradataml function name to a curated one-line summary (e.g., `"KMeans": "Groups observations into k clusters..."`). This dict is the authoritative list of which functions to register.
+
+2. **`tools/utils/__init__.py`** — `build_tdml_tool_docstring(summary, func_metadata, partition_order_cols)` builds the compact MCP tool description at registration time. It reads parameter names, descriptions, Required/Optional, and types directly from `func_metadata.arguments` (teradataml's live JSON store, populated from the database), combining them with the curated summary.
+
+3. **`app.py` (`teradata_lifespan`)** — After confirming the teradataml context is available, iterates `TD_ANALYTIC_FUNCS.items()`, queries the live JSON store for each function's metadata, generates a Python function string via `exec()`, and registers it with `server.tool()`. If a function from the dict is not present in the connected database's function list, it is skipped with a warning. Registration happens once at startup before any client connections are accepted.
+
+**To add a new analytic function:** add one entry to `TD_ANALYTIC_FUNCS` in `tools/constants.py` with a concise one-line description. No other code changes are needed.
 
 ## Project Layout
 
@@ -394,11 +427,12 @@ teradata-mcp-server/
    │  └─ profiles.yml
    └─ tools/
       ├─ __init__.py               # Lazy module loader + explicit exports (e.g., TDConn)
+      ├─ constants.py              # TD_ANALYTIC_FUNCS dict: teradataml function name → one-line summary
       ├─ module_loader.py          # Profiles → load only needed tool modules (+ YAMLs)
       ├─ td_connect.py             # SQLAlchemy connection + auth validation helpers
       ├─ utils/
-      │  ├─ __init__.py            # JSON helpers, auth header parsing, exports queryband
-+     │  └─ queryband.py           # Build Teradata QueryBand from request context
+      │  ├─ __init__.py            # JSON helpers, auth header parsing, tdml docstring builder
+      │  └─ queryband.py           # Build Teradata QueryBand from request context
       ├─ base/ ...                 # Tool groups (base, dba, sec, qlty, rag, fs, tdvs, ...)
       └─ fs/...                    # Optional extras; imported only if profile enables them
 ```
@@ -446,21 +480,93 @@ npx modelcontextprotocol/inspector
 
 ## Build, Test, and Publish
 
-We build with **uv**, test locally (wheel), then push to **TestPyPI** before PyPI.
-The examples below use the Twine utility.
+We build with **uv** and publish via a GitHub Actions release workflow. Releases are not created on every commit — a release is triggered explicitly by pushing a git tag.
 
 ### Versions
 - The CLI reads its version from package metadata (`importlib.metadata`).
 - **Bump only in `pyproject.toml`** (do not hardcode in code).
 - You **cannot overwrite** an existing version on PyPI/TestPyPI — always increment.
 
-### 1) Build artifacts
+### Automated release workflow
+
+The release workflow is defined in [`.github/workflows/release.yml`](../../.github/workflows/release.yml) and runs the following stages in order:
+
+```
+build & verify  →  create GitHub Release  →  publish TestPyPI  →  (approval)  →  publish PyPI
+```
+
+Each stage must succeed before the next starts. The `publish-pypi` job requires manual approval via the `pypi` GitHub Environment — this gives you time to verify the TestPyPI package before it goes to production.
+
+#### One-time GitHub setup
+
+> **VPN required** — you must be connected to the Teradata VPN to access the GitHub repository settings and to generate or retrieve API tokens from PyPI and TestPyPI.
+
+**Secrets** — add these in *Settings → Secrets and variables → Actions*:
+
+| Secret | Where to get it |
+|---|---|
+| `TEST_PYPI_TOKEN` | [test.pypi.org](https://test.pypi.org) → Account → API tokens |
+| `PYPI_TOKEN` | [pypi.org](https://pypi.org) → Account → API tokens |
+
+If you have previously published manually using Twine, your tokens are already stored locally in `~/.pypirc` — copy the `password` values from there rather than generating new ones.
+
+**Environments** — create two environments in *Settings → Environments*:
+- `test-pypi` — no protection rules required
+- `pypi` — add yourself (or your team) as a **Required reviewer** to enable the approval gate
+
+#### Triggering a release
+
+Releases are grouped across multiple commits. When you are ready to ship:
+
+```bash
+# 1. Bump the version in pyproject.toml, commit, and push to main as normal
+git add pyproject.toml
+git commit -m "chore: bump version to 0.2.3"
+git push
+
+# 2. Tag the commit — pushing the tag fires the release workflow
+git tag v0.2.3
+git push origin v0.2.3
+```
+
+The tag must match the version in `pyproject.toml`. The workflow reads the version from `pyproject.toml` at build time and uses it throughout.
+
+#### Approving a production release
+
+After the TestPyPI publish and smoke test succeed, the workflow pauses before publishing to production PyPI and waits for a human to approve. Here is what happens:
+
+1. GitHub sends you an **email notification** and a bell notification in the GitHub UI
+2. Open the Actions run — you will see a yellow banner: *"This workflow is waiting for a review before continuing"*
+3. Click **Review deployments**, tick the `pypi` environment checkbox, and click **Approve and deploy**
+4. The `publish-pypi` job starts and the package is published to production PyPI
+
+If something looks wrong (e.g., the TestPyPI smoke test installed the wrong version), click **Reject** instead — nothing is published to production and the run is cancelled. Fix the issue, bump the version, and start a new release.
+
+> **Note:** Only the GitHub users configured as Required reviewers on the `pypi` environment can approve. The reviewer should confirm the TestPyPI smoke test passed before approving.
+
+#### Re-running a failed publish
+
+If a publish step fails (e.g., a transient network error), use the **Run workflow** button on the [Actions tab](https://github.com/Teradata/teradata-mcp-server/actions/workflows/release.yml) to re-trigger without creating a new tag.
+
+#### What the workflow does
+
+1. **Build & Verify** — runs `uv build --no-cache`, verifies metadata with `uvx twine check`, and smoke-tests the wheel locally
+2. **Create GitHub Release** — creates a GitHub Release for the tag with auto-generated release notes and attaches the wheel and tarball as downloadable assets
+3. **Publish to TestPyPI** — uploads with `uvx twine upload --repository testpypi`, then verifies installation with `uvx`
+4. **Approval gate** — workflow pauses; reviewer approves in the GitHub UI after checking the TestPyPI package
+5. **Publish to PyPI** — uploads with `uvx twine upload`, then runs a final smoke test from production PyPI
+
+### Manual publish (fallback)
+
+If you need to publish outside of CI, the steps below replicate what the workflow does.
+
+#### 1) Build artifacts
 ```bash
 uv build --no-cache
 # Produces dist/teradata_mcp_server-<ver>-py3-none-any.whl and .tar.gz
 ```
 
-### 2) Test the wheel locally (no install)
+#### 2) Test the wheel locally (no install)
 ```bash
 # Run the installed console entry point from the wheel
 uvx ./dist/teradata_mcp_server-<ver>-py3-none-any.whl teradata_mcp_server --version
@@ -470,12 +576,12 @@ uv tool install --reinstall ./dist/teradata_mcp_server-<ver>-py3-none-any.whl
 ~/.local/bin/teradata-mcp-server --help
 ```
 
-### 3) Verify metadata/README
+#### 3) Verify metadata/README
 ```bash
 uvx twine check dist/*
 ```
 
-### 4) Publish to **TestPyPI** (dress rehearsal)
+#### 4) Publish to **TestPyPI** (dress rehearsal)
 ```bash
 # Upload
 uvx twine upload --repository testpypi dist/*
@@ -491,15 +597,15 @@ Notes:
 - `--index-strategy unsafe-best-match` lets uv take our package from TestPyPI and other deps from PyPI.
 - Use `--no-cache` to avoid stale wheels.
 
-### 5) Publish to **PyPI**
+#### 5) Publish to **PyPI**
 ```bash
 uvx twine upload dist/*
 ```
-If you see `File already exists`, it is either:
-- You haven't bumped the the version in `pyproject.toml`. Do so, rebuild, and upload again.
-- You have prior builds in the ./dist directory. Remove prior or be specify the exact version (eg. `uvx twine upload dist/*1.4.0*`)
+If you see `File already exists`, either:
+- You haven't bumped the version in `pyproject.toml`. Do so, rebuild, and upload again.
+- You have prior builds in the `./dist` directory. Remove them or specify the exact version (e.g., `uvx twine upload dist/*0.2.3*`).
 
-### 6) Post‑publish smoke test
+#### 6) Post‑publish smoke test
 ```bash
 # One‑off run
 uvx "teradata-mcp-server==<ver>" --version

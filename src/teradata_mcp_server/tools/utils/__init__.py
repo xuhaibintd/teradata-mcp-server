@@ -21,8 +21,21 @@ from .queryband import build_queryband, sanitize_qb_value  # noqa: F401
 
 # -------------------- Serialization & response helpers -------------------- #
 def serialize_teradata_types(obj: Any) -> Any:
-    """Convert Teradata-specific types to JSON serializable formats."""
-    if isinstance(obj, (date, datetime)):
+    """Convert Teradata-specific types to JSON-serialisable formats.
+
+    Handles None explicitly so that database NULL values are preserved
+    as Python None (→ JSON null) rather than the string ``"None"``.
+
+    Args:
+        obj: The value to convert.
+
+    Returns:
+        A JSON-native type (str, int, float, bool, None) or an
+        ISO-formatted date string.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, date | datetime):
         return obj.isoformat()
     if isinstance(obj, Decimal):
         return float(obj)
@@ -40,21 +53,87 @@ def rows_to_json(cursor_description: Any, rows: list[Any]) -> list[dict[str, Any
     return out
 
 
-def create_response(data: Any, metadata: dict[str, Any] | None = None, error: dict[str, Any] | None = None) -> str:
-    """Create a standardized JSON response structure."""
+def _make_serialisable(obj: Any) -> Any:
+    """Recursively walk an object tree, converting every leaf to a
+    JSON-native Python type.
+
+    This is the deep-conversion counterpart of
+    :func:`serialize_teradata_types`.  It ensures that nested dicts
+    and lists produced by tool handlers contain only types that
+    ``json.dumps`` can serialise without a custom *default* hook,
+    and — critically — that ``None`` values survive as ``None``
+    (JSON ``null``) instead of the string ``"None"``.
+
+    Args:
+        obj: Any Python object (scalar, dict, list, tuple, etc.).
+
+    Returns:
+        A recursively sanitised copy whose leaves are all
+        ``str | int | float | bool | None``.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, str | int | float | bool):
+        return obj
+    if isinstance(obj, date | datetime):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _make_serialisable(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [_make_serialisable(item) for item in obj]
+    # Fallback: cast to string (e.g. bytes, custom objects)
+    return str(obj)
+
+
+def create_response(
+    data: Any,
+    metadata: dict[str, Any] | None = None,
+    error: dict[str, Any] | None = None,
+) -> dict:
+    """Create a standardised MCP response structure.
+
+    .. versionchanged:: 1.1.0
+       Returns a **dict** instead of a JSON string.  The MCP
+       framework requires ``structured_content`` to be a ``dict``
+       (or ``None``); returning a JSON string caused the server to
+       wrap it in a ``[{"type": "text", ...}]`` list which the
+       framework rejected.
+
+       All nested values are recursively sanitised via
+       :func:`_make_serialisable` so that ``None`` / NULL values
+       are preserved as ``None`` (JSON ``null``) and Teradata-
+       specific types (``Decimal``, ``datetime``, etc.) are
+       converted to JSON-native equivalents.
+
+    Args:
+        data:     Payload — typically a list of row-dicts.
+        metadata: Optional dict of tool metadata (tool_name, sql, etc.).
+        error:    Optional error dict; if supplied the response
+                  status is set to ``"error"``.
+
+    Returns:
+        dict: A JSON-serialisable dict ready to be used as
+              MCP ``structured_content``.
+    """
     if error:
-        resp = {"status": "error", "message": error}
+        resp: dict[str, Any] = {"status": "error", "message": error}
         if metadata:
-            resp["metadata"] = metadata
-        return json.dumps(resp, default=serialize_teradata_types)
-    resp = {"status": "success", "results": data}
+            resp["metadata"] = _make_serialisable(metadata)
+        return resp
+
+    resp = {
+        "status": "success",
+        "results": _make_serialisable(data),
+    }
     if metadata:
-        resp["metadata"] = metadata
-    return json.dumps(resp, default=serialize_teradata_types)
+        resp["metadata"] = _make_serialisable(metadata)
+    return resp
 
 
 # ------------------------------ Auth helpers ------------------------------ #
-def parse_auth_header(auth_header: Optional[str]) -> tuple[str, str]:
+def parse_auth_header(auth_header: str | None) -> tuple[str, str]:
     """Parse an HTTP Authorization header into (scheme, value).
 
     Returns ("", "") if header is missing or malformed. Scheme is lowercased
@@ -69,7 +148,7 @@ def parse_auth_header(auth_header: Optional[str]) -> tuple[str, str]:
         return "", ""
 
 
-def compute_auth_token_sha256(auth_header: Optional[str]) -> Optional[str]:
+def compute_auth_token_sha256(auth_header: str | None) -> str | None:
     """Return a hex SHA-256 over the value portion of Authorization header."""
     scheme, value = parse_auth_header(auth_header)
     if not value:
@@ -82,7 +161,7 @@ def compute_auth_token_sha256(auth_header: Optional[str]) -> Optional[str]:
         return None
 
 
-def parse_basic_credentials(b64_value: str) -> tuple[Optional[str], Optional[str]]:
+def parse_basic_credentials(b64_value: str) -> tuple[str | None, str | None]:
     """Decode a Basic credential value into (username, secret)."""
     try:
         raw = base64.b64decode(b64_value).decode("utf-8")
@@ -98,7 +177,7 @@ def parse_basic_credentials(b64_value: str) -> tuple[Optional[str], Optional[str
         return None, None
 
 
-def infer_logmech_from_header(auth_header: Optional[str], default_basic_logmech: str = "LDAP") -> tuple[str, str]:
+def infer_logmech_from_header(auth_header: str | None, default_basic_logmech: str = "LDAP") -> tuple[str, str]:
     """Infer LOGMECH and the credential payload based on the header.
 
     Returns (logmech, payload) where:
@@ -114,7 +193,7 @@ def infer_logmech_from_header(auth_header: Optional[str], default_basic_logmech:
     return "", ""
 
 
-def execute_analytic_function(function_name: str, tables_to_df=[], **kwargs):
+def execute_analytic_function(function_name: str, tables_to_df=None, **kwargs):
     """
     Executes the specified analytic function with the provided keyword arguments.
 
@@ -125,40 +204,45 @@ def execute_analytic_function(function_name: str, tables_to_df=[], **kwargs):
     """
     # Log the received keyword arguments. But make sure not to log sensitive information.
     # Hence remove 'headers' from print.
-    func_params = {k: v for k, v in kwargs.items() if k != 'headers'}
+    if tables_to_df is None:
+        tables_to_df = []
+    func_params = {k: v for k, v in kwargs.items() if k != "headers"}
 
     # Analytic functions are called with 'tdml_' prefix. Remove it.
     function_name = function_name[5:]
 
     logger = logging.getLogger("teradata_mcp_server.utils")
-    logger.info("received kwargs: {} for the function {}".format(func_params, function_name))
+    logger.info(f"received kwargs: {func_params} for the function {function_name}")
 
     # Import the function dynamically based on its name
 
-    from teradataml import DataFrame, in_schema, copy_to_sql
-    from teradataml.common.utils import UtilFuncs
     import teradataml as tdml
+    from teradataml import DataFrame, copy_to_sql, in_schema
+    from teradataml.common.utils import UtilFuncs
+
     # Teradataml accepts DataFrame as input, so we need to convert the table_name
     # and object to DataFrame. Some of the functions accepts object also. If object
     # is provided, we convert it to DataFrame as well.
-    db_name = kwargs.get('database_name', None)
+    db_name = kwargs.get("database_name")
     for arg_name in tables_to_df:
-
         table_name = kwargs.get(arg_name)
 
         # Create DataFrame only if table_name is provided.
         if table_name:
-
             # Table name can be provided with or without schema name. First, extract the schema name and table name.
-            db_name_extracted, table_name = (UtilFuncs._extract_db_name(table_name),
-                                             UtilFuncs._extract_table_name(table_name))
+            db_name_extracted, table_name = (
+                UtilFuncs._extract_db_name(table_name),
+                UtilFuncs._extract_table_name(table_name),
+            )
 
             # In some rare cases, input is received with db_name and also table name with schema.
             # If they are different, raise a ValueError.
             if db_name and db_name_extracted and (db_name != db_name_extracted):
-                raise ValueError(f"Database name provided in 'database_name' argument: {db_name} is different "
-                                 f"from the database name provided in table name: {db_name_extracted}. "
-                                 f"Provide same values. Or, provide database name in table name only.")
+                raise ValueError(
+                    f"Database name provided in 'database_name' argument: {db_name} is different "
+                    f"from the database name provided in table name: {db_name_extracted}. "
+                    f"Provide same values. Or, provide database name in table name only."
+                )
 
             db_name = db_name or db_name_extracted
 
@@ -167,76 +251,64 @@ def execute_analytic_function(function_name: str, tables_to_df=[], **kwargs):
     # Execute the function with the provided keyword arguments
     result = getattr(tdml, function_name)(**kwargs)
 
-    result_to_store = result.result if getattr(result, 'result', None) else result.output
+    result_to_store = result.result if getattr(result, "result", None) else result.output
 
     metadata = {
         "tool_name": function_name,
-        "database_name": kwargs.get('database_name'),
-        "output_table_name": kwargs.get('output_table_name')
+        "database_name": kwargs.get("database_name"),
+        "output_table_name": kwargs.get("output_table_name"),
     }
 
     # If output_table_name is provided, copy the result to the specified table.
-    if kwargs.get('output_table_name') is not None:
-        copy_to_sql(result_to_store,
-                    table_name=kwargs['output_table_name'],
-                    if_exists='fail')
+    if kwargs.get("output_table_name") is not None:
+        copy_to_sql(result_to_store, table_name=kwargs["output_table_name"], if_exists="fail")
 
         return create_response(result, metadata)
 
     return create_response([rec._asdict() for rec in result_to_store.itertuples()], metadata)
 
 
-def convert_tdml_docstring_to_mcp_docstring(doc_string, partition_order_cols_doc_str):
-    """
-    Convert TeradataML function docstring to MCP tool docstring format.
+def _clean_python_types(raw_types: str) -> str:
+    """Extract simple type names from a Python type tuple string, removing teradataml internals."""
+    import re
 
-    PARAMETERS:
-        doc_string:
-            Required Argument.
-            Specifies the doc string for TeradataML function whose docstring needs to be converted.
-            Types: str
+    names = re.findall(r"class '(?:[\w.]+\.)?(\w+)'", raw_types)
+    cleaned = []
+    for n in names:
+        mapped = "str" if n in ("Feature", "DataFrame") else n
+        if mapped not in cleaned:
+            cleaned.append(mapped)
+    return ", ".join(cleaned) if cleaned else "str"
 
-        partition_order_cols_doc_str:
-            Required Argument.
-            Specifies a list of docstring fragments (strings) related to partition columns and order columns
-            to be joined and appended.
-            Types: list of str
 
-    RETURNS:
-        str: Converted docstring in MCP tool format.
+def build_tdml_tool_docstring(summary: str, func_metadata, partition_order_cols: list[str]) -> str:
+    """Build a compact MCP tool docstring from a curated summary and function metadata."""
+    lines = [summary, "", "Arguments:"]
 
-    RAISES:
-        None
-    """
+    for arg in func_metadata.arguments:
+        name = arg.get_lang_name()
+        desc = (arg.get_lang_description() or arg.get_sql_description() or "").strip()
+        # Keep only first sentence
+        first_sentence = desc.split(".")[0].rstrip()
+        required_label = "Required" if arg.is_required() else "Optional"
+        types_str = _clean_python_types(str(arg.get_python_type() or ""))
+        lines.append(f"  {name} - {first_sentence}. {required_label}. Types: {types_str}.")
 
-    # Replace all teradataml DataFrame with table & "data:" with "table_name".
-    doc_string = doc_string.replace("teradataml DataFrame", "table name")
-    doc_string = doc_string.replace("DataFrame", "table name")
+    for col_name in partition_order_cols:
+        lines.append(
+            f"  {col_name}_partition_column - Partition column(s) for the {col_name} table. Optional. Types: str, list."
+        )
+        lines.append(
+            f"  {col_name}_order_column - Order column(s) for the {col_name} table. Optional. Types: str, list."
+        )
 
-    # Remove every thing from generic arguments since examples are not use full.
-    # Then add output argument.
-    addon_doc_string = """
+    lines.append("  output_table_name - Persist result to this table. Optional. Types: str.")
+    lines.append("  database_name - Database to use. Optional. Types: str.")
+    lines.append("")
+    lines.append("Returns:")
+    lines.append("  list of dicts, or table name when output_table_name is set.")
 
-        output_table_name:
-            Optional Argument.
-            Specifies the name of the table to push the result.
-            Types: str
-
-        database_name:
-            Optional Argument.
-            Specifies the name of the database to use.
-            Types: str
-
-    RETURNS:
-        list of dictionaries or table.
-        When user specifies the output_table_name argument, the function
-        returns the table name where the result is pushed. Otherwise, it returns
-        a list of dictionaries containing the result.
-"""
-    base_doc = doc_string.split("**generic_arguments")[0].strip()
-    partition_order_doc = "".join(partition_order_cols_doc_str)
-    final_doc_string = base_doc + partition_order_doc + addon_doc_string
-    return final_doc_string
+    return "\n".join(lines)
 
 
 def get_anlytic_function_signature(params):
@@ -255,15 +327,14 @@ def get_anlytic_function_signature(params):
     RAISES:
         None
     """
-    function_params = OrderedDict((k, v)
-                                  for k, v in params.items())
-    function_params['output_table_name'] = None
-    function_params['database_name'] = None
+    function_params = OrderedDict((k, v) for k, v in params.items())
+    function_params["output_table_name"] = None
+    function_params["database_name"] = None
 
     # Generate function argument string.
     func_args_str = ", ".join(
         [
-            "{} = {}".format(param, '"{}"'.format(value) if isinstance(value, str) else value)
+            "{} = {}".format(param, f'"{value}"' if isinstance(value, str) else value)
             for param, value in function_params.items()
         ]
     )
@@ -282,7 +353,7 @@ def {analytic_function}({func_args_str}):
     Most Importantly:
           Never add optional arguments while function calling, unless specified in user query.
           Never include empty list in any of the function arguments.
-          For any argument, user can pass multiple values. 
+          For any argument, user can pass multiple values.
           Do not consider a comma seperated values in such case.
           Generate a list of values in such case and pass it as argument.
     """
@@ -294,17 +365,5 @@ def {analytic_function}({func_args_str}):
 
 
 def get_partition_col_order_col_doc_string(col_name):
-    """
-    Get the docstring for partition_column parameter.
-    """
-    return f"""
-
-        {col_name}_partition_column:
-            Optional Argument.
-            Specifies the column(s) to partition the table mentioned in argument '{col_name}'.
-            Types: str OR list of Strings (str)
-
-        {col_name}_order_column:
-            Optional Argument.
-            Specifies the column(s) to order the data inside the table mentioned in argument '{col_name}'.
-            Types: str OR list of Strings (str)"""
+    """Returns the column name used to add partition/order params for a given input table."""
+    return col_name
