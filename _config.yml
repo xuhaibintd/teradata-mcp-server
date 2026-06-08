@@ -1,0 +1,20 @@
+title: Teradata MCP Server
+description: Documentation for the Teradata MCP Server
+theme: jekyll-theme-primer
+
+exclude:
+  - .github/
+  - .mypy_cache/
+  - .ruff_cache/
+  - .venv/
+  - agentic/
+  - examples/
+  - scripts/
+  - src/
+  - tests/
+  - uv.lock
+  - pyproject.toml
+  - Dockerfile
+  - docker-compose.yml
+  - env
+  - tddemos_key.pem
