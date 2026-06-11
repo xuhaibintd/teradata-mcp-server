@@ -29,21 +29,106 @@ timeout: 10.0
 
 # Whether to verify TLS certificates. Set to false only for trusted dev targets.
 verify_ssl: false
+allow_absolute_urls: false
+allow_unlisted_endpoints: false
 
 endpoints:
   teikei:
     list:
+      description: 定型検索オブジェクト一覧を取得
       method: GET
       path_template: teikei/objects
     detail:
+      description: 指定した定型検索オブジェクトの基本情報を取得
       method: GET
-      path_template: teikei/objects/{template_id}
+      path_template: teikei/objects/{templateID}
     execute:
+      description: 既存の定型検索オブジェクトを実行
       method: POST
-      path_template: teikei/objects/search/{template_id}
+      path_template: teikei/objects/search/{templateID}
     update:
+      description: 指定した定型検索オブジェクトの基本情報を更新
       method: PUT
-      path_template: teikei/objects/{template_id}
+      path_template: teikei/objects/{templateID}
     delete:
+      description: 指定した定型検索オブジェクトを削除
       method: DELETE
-      path_template: teikei/objects/{template_id}
+      path_template: teikei/objects/{templateID}
+    groups_list:
+      description: 定型検索グループオブジェクト一覧を取得
+      method: GET
+      path_template: teikei/groups
+    groups_create:
+      description: 新しい定型検索グループオブジェクトを作成
+      method: POST
+      path_template: teikei/groups
+    groups_update:
+      description: 指定した定型検索グループオブジェクトの基本情報を更新
+      method: PUT
+      path_template: teikei/groups/{groupID}
+    groups_delete:
+      description: 指定した定型検索グループオブジェクトを削除
+      method: DELETE
+      path_template: teikei/groups/{groupID}
+  requests:
+    list:
+      description: 検索結果一覧を取得
+      method: GET
+      path_template: requests/list
+    info:
+      description: 検索オブジェクト実行結果を取得
+      method: GET
+      path_template: requests/{reqID}/info
+    delete:
+      description: 指定した検索結果を削除
+      method: DELETE
+      path_template: requests/{reqID}
+  meisai:
+    list:
+      description: 明細型検索オブジェクト一覧を取得
+      method: GET
+      path_template: meisai/objects
+    detail:
+      description: 指定した明細型検索オブジェクトの基本情報を取得
+      method: GET
+      path_template: meisai/objects/{objectID}
+    update:
+      description: 指定した明細型検索オブジェクトの基本情報を更新
+      method: PUT
+      path_template: meisai/objects/{objectID}
+    execute:
+      description: 既存の明細型検索オブジェクトを実行
+      method: POST
+      path_template: meisai/objects/search/{objectID}
+    delete:
+      description: 指定した明細型検索オブジェクトを削除
+      method: DELETE
+      path_template: meisai/objects/{objectID}
+    save:
+      description: 明細型検索オブジェクトを保存
+      method: PUT
+      path_template: meisai/object
+    open:
+      description: 指定した明細型検索オブジェクトの詳細情報を取得
+      method: GET
+      path_template: meisai/objects/open/{objectID}
+    groups_list:
+      description: 明細型検索オブジェクトグループ一覧を取得
+      method: GET
+      path_template: meisai/groups
+    groups_detail:
+      description: 指定した明細型検索オブジェクトグループの詳細情報を取得
+      method: GET
+      path_template: meisai/groups/{groupID}
+    groups_create:
+      description: 新しい明細型検索オブジェクトグループを作成
+      method: POST
+      path_template: meisai/groups
+    groups_update:
+      description: 指定した明細型検索オブジェクトグループの基本情報を更新
+      method: PUT
+      path_template: meisai/groups/{groupID}
+    groups_delete:
+      description: 指定した明細型検索オブジェクトグループを削除
+      method: DELETE
+      path_template: meisai/groups/{groupID}

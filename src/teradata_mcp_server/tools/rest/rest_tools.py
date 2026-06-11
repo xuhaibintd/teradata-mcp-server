@@ -6,7 +6,7 @@ from importlib import resources
 from importlib.resources import as_file
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import requests
 import yaml
@@ -14,7 +14,7 @@ import yaml
 from teradata_mcp_server.tools.utils import create_response
 
 from .constants import DEFAULT_TIMEOUT
-from .endpoints import ENDPOINTS, TEIKEI_ENDPOINTS, Endpoint
+from .endpoints import TEIKEI_ENDPOINTS, Endpoint, endpoint_catalog_text, get_endpoint, match_endpoint
 from .types import RestRequest
 
 logger = logging.getLogger("teradata_mcp_server.tools.rest")
@@ -28,6 +28,8 @@ def _default_rest_config() -> dict[str, Any]:
         "default_params": {},
         "timeout": DEFAULT_TIMEOUT,
         "verify_ssl": True,
+        "allow_absolute_urls": False,
+        "allow_unlisted_endpoints": False,
         "auth": {
             "enabled": False,
             "login_path": "",
@@ -126,6 +128,37 @@ def _build_request_url(request: RestRequest, path_override: str | None = None) -
     return urljoin(base, path)
 
 
+def _resolve_request_target(request: RestRequest) -> tuple[str, str]:
+    """Resolve and validate the HTTP method and URL from the configured endpoint registry."""
+    if request.endpoint:
+        if request.path or request.url:
+            raise ValueError("endpoint cannot be combined with path or url")
+        endpoint = get_endpoint(request.endpoint)
+        if request.method and request.method.upper() != endpoint.method:
+            raise ValueError(
+                f"Method mismatch for '{request.endpoint}': configured {endpoint.method}, received {request.method.upper()}"
+            )
+        path = endpoint.build_path(request.path_params)
+        return endpoint.method, _build_request_url(request, path_override=path)
+
+    if request.url:
+        if not REST_CONFIG.get("allow_absolute_urls", False):
+            raise ValueError("Absolute URLs are disabled; use a configured logical endpoint")
+        if not request.method:
+            raise ValueError("method is required when url is used")
+        return request.method.upper(), str(request.url)
+
+    if not request.path:
+        raise ValueError("request.endpoint is required; legacy callers may provide request.method and request.path")
+
+    path = request.path.lstrip("/")
+    if REST_CONFIG.get("allow_unlisted_endpoints", False):
+        return (request.method or "GET").upper(), _build_request_url(request)
+
+    _, endpoint = match_endpoint(path, request.method)
+    return endpoint.method, _build_request_url(request, path_override=path)
+
+
 def _build_login_url(auth_conf: dict[str, Any]) -> str:
     """Build full login URL from config."""
     login_url = auth_conf.get("login_url")
@@ -206,17 +239,13 @@ def _ensure_auth_header(headers: MutableMapping[str, str | bytes]) -> MutableMap
     return headers
 
 
-def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) -> dict[str, Any]:
+def handle_rest_call(conn, request: RestRequest, *args, **kwargs) -> dict[str, Any]:
     """
-    Generic REST caller.
+    Call a REST endpoint configured in rest_config.yml.
 
-    Executes the HTTP request per parameters and returns status, headers, and parsed body.
-    If no absolute URL is provided, it builds one from base_url + path in config.
+    Prefer request.endpoint plus request.path_params. Legacy method/path calls are accepted
+    only when they match a configured endpoint.
     """
-    # Allow zero-argument calls; fall back to default RestRequest
-    if request is None:
-        request = RestRequest()
-
     timeout = request.timeout or REST_CONFIG.get("timeout") or DEFAULT_TIMEOUT
     headers: MutableMapping[str, str | bytes] = {}
     headers.update(REST_CONFIG.get("default_headers") or {})
@@ -225,82 +254,30 @@ def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) 
     params.update(REST_CONFIG.get("default_params") or {})
     params.update(request.params or {})
 
-    # If user did not provide a meaningful path/url, fall back to Teikei list endpoint
-    fallback_path = None
-    fallback_method = None
-
-    def _is_generic(p: str) -> bool:
-        cleaned = p.strip().strip("/")
-        return cleaned in {"", "list", "objects", "items"}
-
-    path_hint = (request.path or "").strip() if request.path is not None else ""
-    path_norm = path_hint.lstrip("/")
-    allowed_paths = {
-        ep.path_template.lstrip("/")
-        for group in ENDPOINTS.values()
-        for ep in group.values()
-        if isinstance(ep, Endpoint)
-    }
-    group_list_endpoints = {
-        name: defs.get("list")
-        for name, defs in ENDPOINTS.items()
-        if isinstance(defs, dict) and isinstance(defs.get("list"), Endpoint)
-    }
-
-    parsed_url = None
+    url = None
     try:
-        if request.url:
-            parsed_url = urlparse(str(request.url))
-    except Exception:
-        parsed_url = None
-
-    base_netloc = ""
-    try:
-        base_netloc = urlparse(REST_CONFIG.get("base_url") or "").netloc
-    except Exception:
-        base_netloc = ""
-
-    generic_path = _is_generic(path_hint)
-    generic_url_path = (
-        parsed_url is not None and parsed_url.netloc == base_netloc and _is_generic(parsed_url.path or "")
-    )
-    unknown_path = path_norm not in allowed_paths
-    no_user_path = (not request.url and (generic_path or unknown_path)) or generic_url_path
-
-    group_fallback = None
-    if not request.url and path_norm:
-        if path_norm in group_list_endpoints:
-            group_fallback = group_list_endpoints[path_norm]
-        elif path_norm.endswith("/list"):
-            group_name = path_norm.split("/", 1)[0]
-            group_fallback = group_list_endpoints.get(group_name)
-
-    if group_fallback:
-        fallback_path = group_fallback.path_template
-        fallback_method = group_fallback.method
-        if request.method is None:
-            request.method = "GET"
-    elif no_user_path:
-        endpoint = TEIKEI_ENDPOINTS.get("list")
-        if endpoint:
-            fallback_path = endpoint.path_template
-            fallback_method = endpoint.method
-            # Default method to GET when we auto-pick the list endpoint
-            if request.method is None:
-                request.method = "GET"
+        method, url = _resolve_request_target(request)
+    except Exception as exc:
+        return create_response(
+            {},
+            {"tool_name": "rest_call", "url": url},
+            error={"message": str(exc)},
+        )
 
     # Inject auth header if configured and not already provided
     try:
         headers = _ensure_auth_header(headers)
     except Exception as exc:
         logger.exception("Failed to obtain auth token")
-        return create_response({"error": f"Failed to obtain auth token: {exc}"}, {"tool_name": "rest_call"})
+        return create_response(
+            {},
+            {"tool_name": "rest_call"},
+            error={"message": f"Failed to obtain auth token: {exc}"},
+        )
 
-    url = None
     try:
-        url = _build_request_url(request, path_override=fallback_path)
         response = requests.request(
-            fallback_method or request.method,
+            method,
             url,
             headers=headers or None,
             params=params or None,
@@ -311,12 +288,15 @@ def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) 
 
         # If 401 and auth enabled, refresh token once and retry
         if response.status_code == 401 and _auth_enabled():
+            auth_conf = REST_CONFIG.get("auth") or {}
+            header_name = auth_conf.get("header_name") or "Authorization"
             with _AUTH_LOCK:
                 global _AUTH_TOKEN
                 _AUTH_TOKEN = None
+            headers.pop(header_name, None)
             headers = _ensure_auth_header(headers)
             response = requests.request(
-                fallback_method or request.method,
+                method,
                 url,
                 headers=headers or None,
                 params=params or None,
@@ -341,12 +321,17 @@ def handle_rest_call(conn, request: RestRequest | None = None, *args, **kwargs) 
             "status_code": getattr(exc.response, "status_code", None),
         }
         return create_response(
-            error_payload,
+            {},
             {"tool_name": "rest_call", "url": url or (str(request.url) if request.url else None)},
+            error=error_payload,
         )
     except Exception as exc:
         logger.exception("REST call error")
-        return create_response({"error": str(exc)}, {"tool_name": "rest_call", "url": url})
+        return create_response(
+            {},
+            {"tool_name": "rest_call", "url": url},
+            error={"message": str(exc)},
+        )
 
 
 def handle_teikei(
@@ -381,21 +366,24 @@ def handle_teikei(
 
     if normalized_action not in valid_actions:
         return create_response(
-            {"error": f"Unsupported action: {normalized_action}, allowed: {valid_actions}"},
+            {},
             {"tool_name": "teikei"},
+            error={"message": f"Unsupported action: {normalized_action}, allowed: {valid_actions}"},
         )
 
     endpoint: Endpoint = TEIKEI_ENDPOINTS[normalized_action]
 
-    # Validate template_id requirement
-    needs_template = "{template_id}" in endpoint.path_template
-    if needs_template and not template_id:
+    # Preserve the legacy teikei wrapper while allowing placeholder names to
+    # remain fully configuration-driven (for example templateID).
+    if endpoint.path_parameters and not template_id:
         return create_response(
-            {"error": f"Missing template_id; cannot call teikei action '{normalized_action}'"},
+            {},
             {"tool_name": "teikei"},
+            error={"message": f"Missing template_id; cannot call teikei action '{normalized_action}'"},
         )
 
-    path = endpoint.path_template.format(template_id=template_id) if needs_template else endpoint.path_template
+    path_params = dict.fromkeys(endpoint.path_parameters, template_id)
+    path = endpoint.build_path(path_params)
 
     rest_req = RestRequest(
         method=endpoint.method,
@@ -404,3 +392,11 @@ def handle_teikei(
     )
 
     return handle_rest_call(conn, rest_req)
+
+
+handle_rest_call.__doc__ = f"""{handle_rest_call.__doc__}
+
+Configured endpoints:
+{endpoint_catalog_text()}
+"""
+handle_rest_call.requires_database = False

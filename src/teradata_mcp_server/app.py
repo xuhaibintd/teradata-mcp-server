@@ -398,6 +398,25 @@ def create_mcp_app(settings: Settings):
         request_context = kwargs.pop("_request_context", None)
         tdconn_local = _state.tdconn
 
+        if getattr(tool, "requires_database", True) is False:
+            hook_ctx = ToolCallContext(
+                tool_name=tool_name,
+                kwargs=dict(kwargs),
+                request_context=request_context,
+                engine=getattr(tdconn_local, "engine", None),
+                profile_name=profile_name,
+                db_user=get_db_user(),
+            )
+            _fire_hook(hooks.on_tool_call, hook_ctx)
+            try:
+                result = tool(None, *args, **kwargs)
+                _fire_hook(hooks.on_tool_result, hook_ctx, result)
+                return format_text_response(result)
+            except Exception as e:
+                _fire_hook(hooks.on_tool_error, hook_ctx, e)
+                logger.error(f"Error in tool {tool_name}: {e}", exc_info=True)
+                raise ToolError(str(e)) from None
+
         if not getattr(tdconn_local, "engine", None):
             raise ToolError("Database connection not available — server may still be starting up")
 
