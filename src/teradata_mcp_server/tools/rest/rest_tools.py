@@ -5,7 +5,7 @@ from collections.abc import MutableMapping
 from importlib import resources
 from importlib.resources import as_file
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin
 
 import requests
@@ -399,4 +399,4 @@ handle_rest_call.__doc__ = f"""{handle_rest_call.__doc__}
 Configured endpoints:
 {endpoint_catalog_text()}
 """
-handle_rest_call.requires_database = False
+cast(Any, handle_rest_call).requires_database = False

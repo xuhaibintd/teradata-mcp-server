@@ -22,9 +22,7 @@ class Endpoint:
     @property
     def path_parameters(self) -> tuple[str, ...]:
         return tuple(
-            field_name
-            for _, field_name, _, _ in string.Formatter().parse(self.path_template)
-            if field_name is not None
+            field_name for _, field_name, _, _ in string.Formatter().parse(self.path_template) if field_name is not None
         )
 
     def build_path(self, path_params: dict[str, Any] | None = None) -> str:
