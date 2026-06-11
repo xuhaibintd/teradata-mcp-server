@@ -1,18 +1,14 @@
 import logging
-import os
 import threading
 from collections.abc import MutableMapping
-from importlib import resources
-from importlib.resources import as_file
-from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin
 
 import requests
-import yaml
 
 from teradata_mcp_server.tools.utils import create_response
 
+from .config_loader import REST_CONFIG
 from .constants import DEFAULT_TIMEOUT
 from .endpoints import TEIKEI_ENDPOINTS, Endpoint, endpoint_catalog_text, get_endpoint, match_endpoint
 from .types import RestRequest
@@ -20,78 +16,6 @@ from .types import RestRequest
 logger = logging.getLogger("teradata_mcp_server.tools.rest")
 
 
-def _default_rest_config() -> dict[str, Any]:
-    """Fallback REST connection configuration."""
-    return {
-        "base_url": "",
-        "default_headers": {},
-        "default_params": {},
-        "timeout": DEFAULT_TIMEOUT,
-        "verify_ssl": True,
-        "allow_absolute_urls": False,
-        "allow_unlisted_endpoints": False,
-        "auth": {
-            "enabled": False,
-            "login_path": "",
-            "method": "POST",
-            "payload": {},
-            "headers": {},
-            "token_field": "token",
-            "header_name": "Authorization",
-            "header_prefix": "Bearer ",
-        },
-    }
-
-
-def _resolve_rest_config_path() -> Path | None:
-    """Resolve the rest_config.yml path with overrides and packaged fallback."""
-    for env in ("REST_CONFIG_PATH", "REST_ENDPOINTS_PATH"):
-        env_path = os.getenv(env)
-        if env_path:
-            env_candidate = Path(env_path).expanduser().resolve()
-            if env_candidate.is_file():
-                return env_candidate
-            logger.warning("%s is set but file not found: %s", env, env_candidate)
-
-    repo_relative = Path(__file__).resolve().parent.parent.parent / "config" / "rest_config.yml"
-    if repo_relative.is_file():
-        return repo_relative
-
-    try:
-        pkg_path = resources.files("teradata_mcp_server.config").joinpath("rest_config.yml")
-        if pkg_path.is_file():
-            with as_file(pkg_path) as resolved_path:
-                return resolved_path
-    except Exception:
-        logger.debug("Packaged rest_config.yml not found via importlib.resources", exc_info=True)
-
-    return None
-
-
-def _load_rest_config() -> dict[str, Any]:
-    """Load REST connection configuration once at module import."""
-    config_path = _resolve_rest_config_path()
-    if not config_path:
-        logger.warning("REST config file not found, using defaults")
-        return _default_rest_config()
-
-    try:
-        default_conf = _default_rest_config()
-        with open(config_path, encoding="utf-8") as f:
-            loaded = yaml.safe_load(f) or {}
-            merged = default_conf | loaded
-            if "auth" in loaded:
-                merged_auth = (default_conf.get("auth") or {}).copy()
-                merged_auth.update(loaded.get("auth") or {})
-                merged["auth"] = merged_auth
-            logger.info("Loaded REST config from %s", config_path)
-            return merged
-    except Exception:
-        logger.exception("Failed to load REST config at %s, using defaults", config_path)
-        return _default_rest_config()
-
-
-REST_CONFIG = _load_rest_config()
 _AUTH_TOKEN: str | None = None
 _AUTH_LOCK = threading.Lock()
 

@@ -1,0 +1,20 @@
+# Example deployment override for the REST tool module.
+# Copy this file to rest_config.local.yml or select it with REST_CONFIG_PATH.
+# Endpoint definitions remain in the adjacent rest_config.yml.
+base_url: "http://domain/AcNaviWebAPI/api/v1"
+
+auth:
+  enabled: true
+  login_path: auth/login
+  method: POST
+  payload:
+    userID: user01
+    userPWD: pass01
+    encryptData: true
+  headers:
+    Content-Type: "application/json"
+  token_field: token
+  header_name: X-Api-Auth
+  header_prefix: ""
+
+verify_ssl: false

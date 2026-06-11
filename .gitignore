@@ -14,7 +14,7 @@ var/
 /profiles.yml
 /*_objects.yml
 examples/app-flowise/.*
-src/teradata_mcp_server/config/rest_config.yml
+src/teradata_mcp_server/tools/rest/rest_config.local.yml
 test_*.py
 .planning/
 .ruff_cache/

@@ -1,14 +1,17 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
 
+from teradata_mcp_server.tools.rest.config_loader import load_rest_config
 from teradata_mcp_server.tools.rest.rest_tools import (
     REST_CONFIG,
     _resolve_request_target,
     handle_rest_call,
 )
 from teradata_mcp_server.tools.rest.types import RestRequest
+from teradata_mcp_server.tools.module_loader import ModuleLoader
 
 
 class FakeResponse:
@@ -27,6 +30,46 @@ class FakeResponse:
 
 
 class RestToolTests(unittest.TestCase):
+    def test_module_loader_excludes_rest_config_files(self):
+        loader = ModuleLoader()
+        loader.determine_required_modules({"tool": [r"^rest_.*"]})
+
+        names = {path.name for path in loader.get_required_yaml_paths()}
+
+        self.assertIn("rest_objects.yml", names)
+        self.assertNotIn("rest_config.yml", names)
+        self.assertNotIn("rest_config.local.yml", names)
+
+    def test_deployment_override_preserves_module_endpoints(self):
+        with (
+            patch(
+                "teradata_mcp_server.tools.rest.config_loader._override_paths",
+                return_value=[Path("rest_config.local.yml")],
+            ),
+            patch(
+                "teradata_mcp_server.tools.rest.config_loader._module_default_config",
+                return_value={
+                    "base_url": "",
+                    "auth": {"enabled": False, "header_name": "Authorization"},
+                    "endpoints": {"meisai": {"detail": {"method": "GET"}}},
+                },
+            ),
+            patch(
+                "teradata_mcp_server.tools.rest.config_loader._load_yaml",
+                return_value={
+                    "base_url": "https://example.test/api/v1",
+                    "auth": {"enabled": True, "header_name": "X-Test-Auth"},
+                },
+            ),
+        ):
+            config = load_rest_config()
+
+        self.assertEqual(config["base_url"], "https://example.test/api/v1")
+        self.assertTrue(config["auth"]["enabled"])
+        self.assertEqual(config["auth"]["header_name"], "X-Test-Auth")
+        self.assertIn("meisai", config["endpoints"])
+        self.assertEqual(config["endpoints"]["meisai"]["detail"]["method"], "GET")
+
     def test_logical_endpoint_builds_encoded_path(self):
         method, url = _resolve_request_target(
             RestRequest(endpoint="meisai.detail", path_params={"objectID": "abc/123"})

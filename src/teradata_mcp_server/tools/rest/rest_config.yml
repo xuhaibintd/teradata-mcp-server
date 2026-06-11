@@ -1,36 +1,27 @@
-# REST API connection defaults.
-# Update base_url/auth as needed; server reads on startup, so restart to apply.
-base_url: "http://domain/AcNaviWebAPI/api/v1"
+# Version-controlled defaults for the REST tool module.
+# Deployment-specific base URLs and credentials belong in rest_config.local.yml
+# or a file selected by REST_CONFIG_PATH.
+base_url: ""
 
-# Headers and query parameters automatically merged into each request unless
-# a tool invocation overrides them.
 default_headers:
   Content-Type: "application/json"
 
 default_params: {}
-
-# Authentication (MCP auto-login + token injection)
-auth:
-  enabled: true
-  login_path: "auth/login"       # relative to base_url
-  method: "POST"
-  payload:
-    userID: "user01"
-    userPWD: "pass01"
-    encryptData: true
-  headers:
-    Content-Type: "application/json"
-  token_field: "token"           # JSON key holding token in login response
-  header_name: "X-Api-Auth"      # header to set when calling business APIs
-  header_prefix: ""              # prefix before token value; use "" if none
-
-# Fallback timeout (seconds) when a tool request does not provide one.
 timeout: 10.0
-
-# Whether to verify TLS certificates. Set to false only for trusted dev targets.
-verify_ssl: false
+verify_ssl: true
 allow_absolute_urls: false
 allow_unlisted_endpoints: false
+
+auth:
+  enabled: false
+  login_path: ""
+  method: POST
+  payload: {}
+  headers:
+    Content-Type: "application/json"
+  token_field: token
+  header_name: Authorization
+  header_prefix: "Bearer "
 
 endpoints:
   teikei:

@@ -687,7 +687,7 @@ def create_mcp_app(settings: Settings):
             for subpkg in tools_pkg_root.iterdir():
                 if subpkg.is_dir():
                     for entry in subpkg.iterdir():
-                        if entry.is_file() and entry.name.endswith(".yml"):
+                        if entry.is_file() and entry.name.endswith("_objects.yml"):
                             tool_yml_resources.append(entry)
         custom_object_files.extend(tool_yml_resources)
         logger.info(f"Loading all YAML files (no specific profile): {len(tool_yml_resources)} files")

@@ -164,7 +164,7 @@ class ModuleLoader:
                         module_dir = tools_pkg_root.joinpath(module_name)
                         if module_dir.is_dir():
                             for entry in module_dir.iterdir():
-                                if entry.is_file() and entry.name.endswith(".yml"):
+                                if entry.is_file() and entry.name.endswith("_objects.yml"):
                                     yaml_paths.append(entry)
         except Exception as e:
             import logging

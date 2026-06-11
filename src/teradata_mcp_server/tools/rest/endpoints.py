@@ -1,16 +1,12 @@
 """Configuration-driven endpoint registry for REST APIs."""
 
-import os
 import re
 import string
 from dataclasses import dataclass
-from importlib import resources
-from importlib.resources import as_file
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import yaml
+from .config_loader import REST_CONFIG
 
 
 @dataclass(frozen=True)
@@ -43,35 +39,8 @@ class Endpoint:
         return re.fullmatch("".join(pattern_parts), path.lstrip("/")) is not None
 
 
-def _resolve_config_path() -> Path | None:
-    """Locate rest_config.yml (or override via REST_CONFIG_PATH/REST_ENDPOINTS_PATH)."""
-    for env in ("REST_CONFIG_PATH", "REST_ENDPOINTS_PATH"):
-        env_path = os.getenv(env)
-        if env_path:
-            candidate = Path(env_path).expanduser().resolve()
-            if candidate.is_file():
-                return candidate
-    repo_relative = Path(__file__).resolve().parent.parent.parent / "config" / "rest_config.yml"
-    if repo_relative.is_file():
-        return repo_relative
-    try:
-        pkg_path = resources.files("teradata_mcp_server.config").joinpath("rest_config.yml")
-        if pkg_path.is_file():
-            with as_file(pkg_path) as resolved_path:
-                return resolved_path
-    except Exception:
-        pass
-    return None
-
-
-def _load_yaml_endpoints(path: Path) -> dict[str, dict[str, Endpoint]]:
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    # support two layouts: top-level "endpoints" or direct mapping
-    candidates = data.get("endpoints") if isinstance(data, dict) else None
-    if candidates is None:
-        candidates = data if isinstance(data, dict) else {}
-
+def _parse_endpoints(config: dict[str, Any]) -> dict[str, dict[str, Endpoint]]:
+    candidates = config.get("endpoints") or {}
     parsed: dict[str, dict[str, Endpoint]] = {}
     for group, defs in candidates.items():
         if not isinstance(defs, dict):
@@ -95,13 +64,7 @@ def _load_yaml_endpoints(path: Path) -> dict[str, dict[str, Endpoint]]:
 
 
 def load_endpoints() -> dict[str, dict[str, Endpoint]]:
-    path = _resolve_config_path()
-    if not path:
-        return {}
-    try:
-        return _load_yaml_endpoints(path)
-    except Exception:
-        return {}
+    return _parse_endpoints(REST_CONFIG)
 
 
 def endpoint_names() -> list[str]:
@@ -143,6 +106,6 @@ def endpoint_catalog_text() -> str:
     return "\n".join(lines) if lines else "- No endpoints are configured."
 
 
-# Loaded endpoint registry (can be extended via rest_config.yml endpoints section)
+# Loaded endpoint registry from the layered REST configuration.
 ENDPOINTS = load_endpoints()
 TEIKEI_ENDPOINTS = ENDPOINTS.get("teikei", {})
